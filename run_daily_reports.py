@@ -51,22 +51,40 @@ def run_daily_reports():
                     print(f"Generating report for user {user.id}")
 
                     # Since we can't use Celery on PythonAnywhere, run directly
-                    result = generate_daily_report(user.id)
+                    result = generate_daily_report(user.id) or {}
 
-                    if result.get('status') == 'success':
+                    status = result.get('status')
+                    is_success = bool(result.get('success'))
+                    already_exists = status == 'already_exists'
+                    has_report = result.get('report_id') is not None and not result.get('error')
+
+                    if is_success or already_exists or has_report:
                         results['successful'] += 1
-                        print(f"✅ Report generated for user {user.id}")
+                        if already_exists:
+                            print(f"✅ Report already existed for user {user.id} (id={result.get('report_id')})")
+                        else:
+                            print(f"✅ Report generated for user {user.id} (id={result.get('report_id')})")
                     else:
                         results['failed'] += 1
-                        error_msg = result.get('error', 'Unknown error')
+                        # Show full payload for debugging when no explicit error is present
+                        error_msg = result.get('error')
+                        if not error_msg:
+                            error_msg = f"No 'success' flag; payload={result}"
                         results['errors'].append(f"User {user.id}: {error_msg}")
                         print(f"❌ Report failed for user {user.id}: {error_msg}")
+
 
                 except Exception as e:
                     results['failed'] += 1
                     error_msg = str(e)
                     results['errors'].append(f"User {user.id}: {error_msg}")
                     print(f"❌ Exception for user {user.id}: {error_msg}")
+
+                    # Handle database session rollback
+                    try:
+                        db.session.rollback()
+                    except Exception as rollback_error:
+                        print(f"⚠️ Session rollback failed: {str(rollback_error)}")
 
             # Print summary
             success_rate = results['successful'] / results['total_users'] if results['total_users'] > 0 else 0

@@ -47,6 +47,121 @@ class AnomalyDetector:
             'statistical_process_control': self._spc_detection
         }
 
+    def scan(self, user_id: int, query_text: str) -> Dict:
+        """
+        Scan method for compatibility with metrics service
+
+        Args:
+            user_id: User ID
+            query_text: Query text to analyze
+
+        Returns:
+            Dictionary with anomaly detection results
+        """
+        try:
+            # Import here to avoid circular imports
+            from services.metrics_service import MetricsService
+
+            # Get metrics data for the user
+            metrics_service = MetricsService()
+
+            # Extract metric types from query
+            metric_types = []
+            query_lower = query_text.lower()
+
+            # Define metric patterns for anomaly queries
+            metric_patterns = {
+                'heart_rate': ['heart rate', 'rhr', 'resting heart rate'],
+                'hrv': ['hrv', 'heart rate variability'],
+                'sleep_score': ['sleep', 'sleep score', 'sleep quality'],
+                'recovery': ['recovery', 'recovery score'],
+                'temperature': ['temperature', 'temp', 'body temperature'],
+                'glucose': ['glucose', 'blood sugar']
+            }
+
+            for metric_type, patterns in metric_patterns.items():
+                if any(pattern in query_lower for pattern in patterns):
+                    metric_types.append(metric_type)
+
+            if not metric_types:
+                # Default to common metrics if none specified
+                metric_types = ['heart_rate', 'hrv', 'temperature']
+
+            # Get data for analysis
+            from datetime import datetime, timedelta
+
+            # Determine timeframe from query
+            timeframe_days = 7  # Default
+            if 'week' in query_lower:
+                timeframe_days = 7
+            elif 'month' in query_lower:
+                timeframe_days = 30
+            elif 'day' in query_lower:
+                timeframe_days = 1
+
+            end_date = datetime.utcnow()
+            start_date = end_date - timedelta(days=timeframe_days)
+
+            all_anomalies_found = False
+            anomaly_details = {}
+
+            for metric_type in metric_types:
+                try:
+                    metrics = metrics_service.get_user_metrics(
+                        user_id, metric_type, start_date, end_date
+                    )
+
+                    if metrics and len(metrics) >= 5:  # Need minimum data for anomaly detection
+                        values = [m.value for m in metrics if m.value is not None]
+                        timestamps = [m.timestamp for m in metrics if m.value is not None]
+
+                        if len(values) >= 5:
+                            # Detect anomalies
+                            results = self.detect_anomalies(
+                                np.array(values),
+                                timestamps=timestamps,
+                                methods=['z_score', 'modified_z_score', 'isolation_forest']
+                            )
+
+                            anomaly_count = results['detection_summary']['anomalies_detected']
+                            if anomaly_count > 0:
+                                all_anomalies_found = True
+                                anomaly_details[metric_type] = {
+                                    'count': anomaly_count,
+                                    'rate': results['detection_summary']['anomaly_rate'],
+                                    'severe_count': results['detection_summary']['severe_anomalies']
+                                }
+                except Exception as e:
+                    logger.warning(f"Failed to analyze {metric_type} for anomalies: {str(e)}")
+                    continue
+
+            if not all_anomalies_found:
+                return {
+                    "success": True,
+                    "results": {"anomalies_found": False},
+                    "insight": "No significant anomalies vs baseline. If you suspect a spike, specify the metric and date range."
+                }
+
+            # Generate insight
+            insight = self._generate_anomaly_insight(anomaly_details, query_text, timeframe_days)
+
+            return {
+                "success": True,
+                "results": {
+                    "anomalies_found": True,
+                    "anomaly_details": anomaly_details
+                },
+                "insight": insight
+            }
+
+        except Exception as e:
+            logger.error(f"Anomaly scan failed: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e),
+                "insight": "No significant anomalies vs baseline. If you suspect a spike, specify the metric and date range."
+            }
+
     @cache_statistical_analysis(expire_seconds=1800)
     def detect_anomalies(self, data: Union[pd.DataFrame, np.ndarray],
                         timestamps: Optional[List] = None,
@@ -613,3 +728,50 @@ def analyze_anomaly_patterns(anomalies: np.ndarray, timestamps: List,
     except Exception as e:
         logger.error(f"Anomaly pattern analysis failed: {str(e)}")
         return {'error': str(e)}
+
+    def _generate_anomaly_insight(self, anomaly_details: Dict, query_text: str, timeframe_days: int) -> str:
+        """Generate human-readable insight from anomaly detection results"""
+        try:
+            if not anomaly_details:
+                return "No significant anomalies vs baseline. If you suspect a spike, specify the metric and date range."
+
+            insights = []
+            total_anomalies = 0
+
+            for metric_type, details in anomaly_details.items():
+                count = details['count']
+                rate = details['rate']
+                severe_count = details['severe_count']
+
+                total_anomalies += count
+
+                metric_name = metric_type.replace('_', ' ').title()
+
+                if severe_count > 0:
+                    insights.append(f"{metric_name}: {severe_count} severe anomalies detected")
+                elif count > 1:
+                    insights.append(f"{metric_name}: {count} anomalies detected ({rate:.1%} of readings)")
+                else:
+                    insights.append(f"{metric_name}: 1 anomaly detected")
+
+            if insights:
+                base_insight = f"Found {total_anomalies} anomalies over {timeframe_days} day{'s' if timeframe_days > 1 else ''}: "
+                base_insight += ". ".join(insights) + "."
+
+                # Add contextual advice based on query
+                if 'temperature' in query_text.lower():
+                    base_insight += " Monitor for fever or temperature regulation issues."
+                elif 'heart rate' in query_text.lower():
+                    base_insight += " Consider reviewing recent activities, stress levels, or sleep quality."
+                elif 'sleep' in query_text.lower():
+                    base_insight += " Examine sleep environment, bedtime routine, or recent lifestyle changes."
+                else:
+                    base_insight += " Review recent activities, diet, or lifestyle changes that may explain these spikes."
+
+                return base_insight
+            else:
+                return "No significant anomalies vs baseline. If you suspect a spike, specify the metric and date range."
+
+        except Exception as e:
+            logger.warning(f"Failed to generate anomaly insight: {str(e)}")
+            return "No significant anomalies vs baseline. If you suspect a spike, specify the metric and date range."

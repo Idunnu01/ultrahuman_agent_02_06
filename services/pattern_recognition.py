@@ -25,6 +25,7 @@ class PatternRecognizer:
     def __init__(self):
         self.analyzer = StatisticalAnalyzer()
         self.min_samples = 20  # Minimum data points for pattern recognition
+
         # Pattern types and their characteristics
         self.pattern_types = {
             'behavioral_cluster': {
@@ -48,6 +49,119 @@ class PatternRecognizer:
                 'min_confidence': 0.75
             }
         }
+
+    def find_patterns(self, user_id: int, query_text: str) -> Dict:
+        """
+        Find patterns method for compatibility with metrics service
+
+        Args:
+            user_id: User ID
+            query_text: Query text to analyze
+
+        Returns:
+            Dictionary with pattern recognition results
+        """
+        try:
+            # Convert user_id to string if needed
+            user_id_str = str(user_id)
+
+            # Use discover_patterns method with default timeframe
+            timeframe = timedelta(days=30)
+
+            # Determine pattern types based on query
+            query_lower = query_text.lower()
+            pattern_types = None
+
+            if 'time' in query_lower or 'day' in query_lower or 'week' in query_lower:
+                pattern_types = ['temporal_sequence']
+            elif 'meal' in query_lower or 'food' in query_lower:
+                pattern_types = ['response_pattern', 'temporal_sequence']
+            elif 'anomal' in query_lower or 'unusual' in query_lower:
+                pattern_types = ['anomaly_pattern']
+            else:
+                pattern_types = ['behavioral_cluster', 'temporal_sequence']
+
+            # Discover patterns
+            results = self.discover_patterns(user_id_str, timeframe, pattern_types)
+
+            if 'error' in results:
+                return {
+                    "success": False,
+                    "error": results['error'],
+                    "insight": "No clear recurring patterns detected. Try logging a few more days or narrowing to a weekday/time-of-day window."
+                }
+
+            # Generate insight
+            insight = self._generate_pattern_insight(results, query_text)
+
+            return {
+                "success": True,
+                "results": results,
+                "insight": insight
+            }
+
+        except Exception as e:
+            logger.error(f"Pattern finding failed: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e),
+                "insight": "No clear recurring patterns detected. Try logging a few more days or narrowing to a weekday/time-of-day window."
+            }
+
+    def _generate_pattern_insight(self, results: Dict, query_text: str) -> str:
+        """Generate human-readable insight from pattern recognition results"""
+        try:
+            discovered_patterns = results.get('discovered_patterns', {})
+            pattern_summary = results.get('pattern_summary', {})
+
+            if not discovered_patterns:
+                return "No clear recurring patterns detected. Try logging a few more days or narrowing to a weekday/time-of-day window."
+
+            insights = []
+
+            # Check for behavioral clusters
+            if 'behavioral_cluster' in discovered_patterns:
+                cluster_data = discovered_patterns['behavioral_cluster']
+                n_clusters = cluster_data.get('n_clusters', 0)
+                if n_clusters > 1:
+                    insights.append(f"Found {n_clusters} distinct behavioral patterns in your data")
+
+            # Check for temporal sequences
+            if 'temporal_sequence' in discovered_patterns:
+                temporal_data = discovered_patterns['temporal_sequence']
+                n_patterns = temporal_data.get('n_patterns', 0)
+                if n_patterns > 0:
+                    insights.append(f"Identified {n_patterns} recurring time-based patterns")
+
+            # Check for anomaly patterns
+            if 'anomaly_pattern' in discovered_patterns:
+                anomaly_data = discovered_patterns['anomaly_pattern']
+                anomaly_rate = anomaly_data.get('anomaly_rate', 0)
+                if anomaly_rate > 0.05:  # More than 5% anomalies
+                    insights.append(f"Detected recurring anomalies ({anomaly_rate:.1%} of data points)")
+
+            # Check for response patterns
+            if 'response_pattern' in discovered_patterns:
+                response_data = discovered_patterns['response_pattern']
+                if 'common_patterns' in response_data:
+                    insights.append("Found consistent response patterns to interventions")
+
+            if insights:
+                base_insight = ". ".join(insights) + "."
+
+                # Add specific advice based on query
+                if 'time' in query_text.lower() or 'day' in query_text.lower():
+                    base_insight += " Consider tracking specific times for more detailed analysis."
+                elif 'meal' in query_text.lower():
+                    base_insight += " Monitor meal timing and composition for optimization opportunities."
+
+                return base_insight
+            else:
+                return "No clear recurring patterns detected. Try logging a few more days or narrowing to a weekday/time-of-day window."
+
+        except Exception as e:
+            logger.warning(f"Failed to generate pattern insight: {str(e)}")
+            return "No clear recurring patterns detected. Try logging a few more days or narrowing to a weekday/time-of-day window."
     @cache_statistical_analysis(expire_seconds=3600)
     def discover_patterns(self, user_id: str, timeframe: timedelta = timedelta(days=30),
                          pattern_types: Optional[List[str]] = None) -> Dict:

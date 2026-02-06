@@ -164,7 +164,7 @@ class PatternMiner:
             # Create common time grid (hourly)
             min_time = min(all_timestamps)
             max_time = max(all_timestamps)
-            time_grid = pd.date_range(start=min_time, end=max_time, freq='H')
+            time_grid = pd.date_range(start=min_time, end=max_time, freq='h')
 
             # Align each metric to time grid
             aligned_data = {}
@@ -177,11 +177,11 @@ class PatternMiner:
 
                 # Create time series and resample
                 series = pd.Series(values, index=timestamps)
-                resampled = series.resample('H').mean()
+                resampled = series.resample('h').mean()
                 aligned = resampled.reindex(time_grid)
 
                 # Forward fill missing values
-                aligned = aligned.fillna(method='ffill').fillna(method='bfill')
+                aligned = aligned.ffill().bfill()
                 aligned_data[metric_type] = aligned.values
 
             if not aligned_data:

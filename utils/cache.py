@@ -21,13 +21,13 @@ except ImportError:
 
 class CacheManager:
     """Cache manager with Redis fallback to in-memory storage"""
-    
+
     def __init__(self, redis_url=None):
         self.redis_available = False
         self.redis_client = None
         self.json_redis_client = None
         self._memory_cache = {}
-        
+
         # Try to initialize Redis
         if REDIS_AVAILABLE and redis_url:
             try:
@@ -42,7 +42,7 @@ class CacheManager:
                 self.redis_available = False
         else:
             logger.info("Redis not configured, using in-memory cache")
-    
+
     def init_app(self, app):
         """Initialize with Flask app"""
         redis_url = app.config.get('REDIS_URL')
@@ -57,14 +57,14 @@ class CacheManager:
             except Exception as e:
                 logger.warning(f"Redis connection failed: {str(e)}")
                 self.redis_available = False
-        
+
         app.cache = self
-    
+
     def _make_key(self, *args, **kwargs):
         """Generate cache key from arguments"""
         key_data = str(args) + str(sorted(kwargs.items()))
         return hashlib.md5(key_data.encode()).hexdigest()
-    
+
     def get(self, key, default=None):
         """Get value from cache"""
         try:
@@ -78,7 +78,7 @@ class CacheManager:
         except Exception as e:
             logger.warning(f"Cache get failed for key {key}: {str(e)}")
             return default
-    
+
     def set(self, key, value, expire=None):
         """Set value in cache with optional expiration"""
         try:
@@ -96,7 +96,7 @@ class CacheManager:
         except Exception as e:
             logger.warning(f"Cache set failed for key {key}: {str(e)}")
             return False
-    
+
     def get_json(self, key, default=None):
         """Get JSON value from cache"""
         try:
@@ -110,7 +110,7 @@ class CacheManager:
         except Exception as e:
             logger.warning(f"Cache JSON get failed for key {key}: {str(e)}")
             return default
-    
+
     def set_json(self, key, value, expire=None):
         """Set JSON value in cache"""
         try:
@@ -128,7 +128,7 @@ class CacheManager:
         except Exception as e:
             logger.warning(f"Cache JSON set failed for key {key}: {str(e)}")
             return False
-    
+
     def delete(self, key):
         """Delete key from cache"""
         try:
@@ -139,7 +139,7 @@ class CacheManager:
         except Exception as e:
             logger.warning(f"Cache delete failed for key {key}: {str(e)}")
             return False
-    
+
     def exists(self, key):
         """Check if key exists in cache"""
         try:
@@ -161,11 +161,11 @@ def cache_result(expire_seconds=300, key_prefix=""):
         def wrapper(*args, **kwargs):
             func_name = f"{key_prefix}{func.__module__}.{func.__name__}"
             cache_key = f"{func_name}:{cache._make_key(*args, **kwargs)}"
-            
+
             result = cache.get(cache_key)
             if result is not None:
                 return result
-            
+
             result = func(*args, **kwargs)
             cache.set(cache_key, result, expire_seconds)
             return result
@@ -178,11 +178,11 @@ def cache_user_data(expire_seconds=600):
         def wrapper(user_id, *args, **kwargs):
             func_name = f"user_data.{func.__name__}"
             cache_key = f"{func_name}:{user_id}:{cache._make_key(*args, **kwargs)}"
-            
+
             result = cache.get(cache_key)
             if result is not None:
                 return result
-            
+
             result = func(user_id, *args, **kwargs)
             cache.set(cache_key, result, expire_seconds)
             return result
@@ -195,11 +195,11 @@ def cache_statistical_analysis(expire_seconds=1800):
         def wrapper(*args, **kwargs):
             func_name = f"stats.{func.__name__}"
             cache_key = f"{func_name}:{cache._make_key(*args, **kwargs)}"
-            
+
             result = cache.get(cache_key)
             if result is not None:
                 return result
-            
+
             result = func(*args, **kwargs)
             cache.set(cache_key, result, expire_seconds)
             return result
@@ -212,7 +212,7 @@ class MetricsCache:
     def cache_recent_metrics(user_id, metrics_data, hours=24):
         cache_key = f"recent_metrics:{user_id}:{hours}h"
         cache.set_json(cache_key, metrics_data, expire=timedelta(hours=1))
-    
+
     @staticmethod
     def get_recent_metrics(user_id, hours=24):
         cache_key = f"recent_metrics:{user_id}:{hours}h"
@@ -225,18 +225,18 @@ class RateLimiter:
             import time
             current_time = time.time()
             rate_data = cache.get(key, {'count': 0, 'window_start': current_time})
-            
+
             if current_time - rate_data['window_start'] > window_seconds:
                 rate_data = {'count': 1, 'window_start': current_time}
             else:
                 rate_data['count'] += 1
-            
+
             cache.set(key, rate_data, window_seconds)
             return rate_data['count'] <= limit
         except Exception as e:
             logger.warning(f"Rate limit check failed: {str(e)}")
             return True
-    
+
     @staticmethod
     def get_remaining(key, limit):
         try:

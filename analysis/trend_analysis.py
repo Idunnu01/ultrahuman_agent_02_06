@@ -36,9 +36,108 @@ class TrendAnalyzer:
             'linear_regression': self._linear_trend_analysis,
             'mann_kendall': self._mann_kendall_trend,
             'seasonal_decomposition': self._seasonal_trend_analysis,
-            'change_point_detection': self._change_point_analysis,
+            'change_point_detection': self._change_point_detection,
             'autocorrelation': self._autocorrelation_analysis
         }
+
+    def compute(self, user_id: int, query_text: str) -> Dict:
+        """
+        Compute method for compatibility with metrics service
+
+        Args:
+            user_id: User ID
+            query_text: Query text to analyze
+
+        Returns:
+            Dictionary with trend analysis results
+        """
+        try:
+            # Import here to avoid circular imports
+            from services.metrics_service import MetricsService
+
+            # Get metrics data for the user
+            metrics_service = MetricsService()
+
+            # Extract metric types from query
+            metric_types = []
+            query_lower = query_text.lower()
+
+            # Define metric synonyms for trend queries
+            metric_patterns = {
+                'heart_rate': ['heart rate', 'rhr', 'resting heart rate'],
+                'hrv': ['hrv', 'heart rate variability'],
+                'sleep_score': ['sleep', 'sleep score', 'sleep quality'],
+                'recovery': ['recovery', 'recovery score'],
+                'temperature': ['temperature', 'temp', 'body temperature'],
+                'glucose': ['glucose', 'blood sugar']
+            }
+
+            for metric_type, patterns in metric_patterns.items():
+                if any(pattern in query_lower for pattern in patterns):
+                    metric_types.append(metric_type)
+
+            if not metric_types:
+                # Default to common metrics if none specified
+                metric_types = ['heart_rate', 'hrv', 'sleep_score']
+
+            # Get data for analysis
+            data = {}
+            for metric_type in metric_types:
+                try:
+                    # Get last 30 days of data
+                    end_date = datetime.utcnow()
+                    start_date = end_date - timedelta(days=30)
+
+                    metrics = metrics_service.get_user_metrics(
+                        user_id, metric_type, start_date, end_date
+                    )
+
+                    if metrics and len(metrics) >= 3:
+                        values = [m.value for m in metrics if m.value is not None]
+                        timestamps = [m.timestamp for m in metrics if m.value is not None]
+
+                        if len(values) >= 3:
+                            data[metric_type] = {
+                                'values': values,
+                                'timestamps': timestamps
+                            }
+                except Exception as e:
+                    logger.warning(f"Failed to get {metric_type} data: {str(e)}")
+                    continue
+
+            if not data:
+                return {
+                    "success": False,
+                    "error": "No sufficient data found for trend analysis",
+                    "insight": "No clear trend detected (insufficient data or high variance). Try a 7–14 day window and consistent logging."
+                }
+
+            # Perform trend analysis
+            results = self.analyze_trends(data)
+
+            if 'error' in results:
+                return {
+                    "success": False,
+                    "error": results['error'],
+                    "insight": "No clear trend detected (insufficient data or high variance). Try a 7–14 day window and consistent logging."
+                }
+
+            # Generate insight from results
+            insight = self._generate_trend_insight(results, query_text)
+
+            return {
+                "success": True,
+                "results": results,
+                "insight": insight
+            }
+
+        except Exception as e:
+            logger.error(f"Trend compute failed: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e),
+                "insight": "No clear trend detected (insufficient data or high variance). Try a 7–14 day window and consistent logging."
+            }
 
     @cache_statistical_analysis(expire_seconds=1800)
     def analyze_trends(self, data: Dict, methods: Optional[List[str]] = None,
@@ -611,3 +710,49 @@ class TrendAnalyzer:
 
         except Exception:
             return False
+
+    def _generate_trend_insight(self, results: Dict, query_text: str) -> str:
+        """Generate human-readable insight from trend analysis results"""
+        try:
+            significant_trends = results.get('significant_trends', [])
+            overall_trends = results.get('overall_trends', {})
+
+            if not significant_trends:
+                return "No clear trend detected (insufficient data or high variance). Try a 7–14 day window and consistent logging."
+
+            insights = []
+            for trend in significant_trends:
+                metric = trend['metric']
+                direction = trend['direction']
+                strength = trend['strength']
+                confidence = trend.get('confidence', 0)
+
+                if direction == 'increasing':
+                    trend_desc = f"{metric.replace('_', ' ').title()} is trending upward"
+                elif direction == 'decreasing':
+                    trend_desc = f"{metric.replace('_', ' ').title()} is trending downward"
+                else:
+                    trend_desc = f"{metric.replace('_', ' ').title()} shows no clear trend"
+
+                if strength in ['strong', 'very_strong'] and confidence > 0.7:
+                    trend_desc += f" with {strength} confidence"
+
+                insights.append(trend_desc)
+
+            if insights:
+                base_insight = ". ".join(insights) + "."
+
+                # Add contextual advice based on query
+                if 'improving' in query_text.lower() or 'better' in query_text.lower():
+                    if any('upward' in insight for insight in insights):
+                        base_insight += " This indicates positive improvement."
+                    else:
+                        base_insight += " Consider reviewing your habits for potential improvements."
+
+                return base_insight
+            else:
+                return "No clear trend detected (insufficient data or high variance). Try a 7–14 day window and consistent logging."
+
+        except Exception as e:
+            logger.warning(f"Failed to generate trend insight: {str(e)}")
+            return "No clear trend detected (insufficient data or high variance). Try a 7–14 day window and consistent logging."

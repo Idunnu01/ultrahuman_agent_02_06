@@ -66,7 +66,7 @@ class CorrelationAnalyzer:
             # Prepare data matrix
             aligned_data = self._align_time_series(data)
 
-            if not aligned_data or len(aligned_data['timestamps']) < self.min_sample_size:
+            if aligned_data is None or not isinstance(aligned_data, dict) or 'timestamps' not in aligned_data or len(aligned_data['timestamps']) < self.min_sample_size:
                 return {'error': 'Insufficient aligned data for correlation analysis'}
 
             metric_names = list(aligned_data['metrics'].keys())
@@ -150,7 +150,7 @@ class CorrelationAnalyzer:
             # Find all unique timestamps across all metrics
             all_timestamps = set()
             for metric_type, metric_data in data.items():
-                if 'timestamps' in metric_data and metric_data['timestamps']:
+                if 'timestamps' in metric_data and metric_data['timestamps'] is not None and len(metric_data['timestamps']) > 0:
                     all_timestamps.update(metric_data['timestamps'])
 
             if not all_timestamps:
@@ -257,13 +257,22 @@ class CorrelationAnalyzer:
             if len(data1) != len(data2) or len(data1) < self.min_sample_size:
                 return {'error': 'Insufficient or mismatched data'}
 
+            # Enhanced data cleaning - remove NaN, Inf, and check for constant arrays
+            # Replace infinite values with NaN first
+            data1_clean = np.where(np.isfinite(data1), data1, np.nan)
+            data2_clean = np.where(np.isfinite(data2), data2, np.nan)
+
             # Remove any remaining NaN values
-            valid_mask = ~(np.isnan(data1) | np.isnan(data2))
-            clean_data1 = data1[valid_mask]
-            clean_data2 = data2[valid_mask]
+            valid_mask = ~(np.isnan(data1_clean) | np.isnan(data2_clean))
+            clean_data1 = data1_clean[valid_mask]
+            clean_data2 = data2_clean[valid_mask]
 
             if len(clean_data1) < self.min_sample_size:
-                return {'error': 'Insufficient clean data after NaN removal'}
+                return {'error': 'Insufficient clean data after NaN/Inf removal'}
+
+            # Check for constant arrays (no variation)
+            if np.std(clean_data1) == 0 or np.std(clean_data2) == 0:
+                return {'error': 'Constant array detected - no variation in data'}
 
             pair_results = {
                 'sample_size': len(clean_data1),
@@ -468,13 +477,29 @@ class CorrelationAnalyzer:
                     if len(x) < self.min_sample_size:
                         continue
 
+                    # Enhanced data cleaning for lagged analysis
+                    x_clean = np.where(np.isfinite(x), x, np.nan)
+                    y_clean = np.where(np.isfinite(y), y, np.nan)
+
+                    # Remove NaN values
+                    valid_mask = ~(np.isnan(x_clean) | np.isnan(y_clean))
+                    x_final = x_clean[valid_mask]
+                    y_final = y_clean[valid_mask]
+
+                    if len(x_final) < self.min_sample_size:
+                        continue
+
+                    # Check for constant arrays
+                    if np.std(x_final) == 0 or np.std(y_final) == 0:
+                        continue
+
                     # Calculate Pearson correlation for this lag
-                    r, p_value = pearsonr(x, y)
+                    r, p_value = pearsonr(x_final, y_final)
 
                     lag_results['correlations_by_lag'][lag] = {
                         'correlation': float(r),
                         'p_value': float(p_value),
-                        'sample_size': len(x),
+                        'sample_size': len(x_final),
                         'significant': p_value < self.significance_level
                     }
 

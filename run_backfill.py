@@ -1,135 +1,94 @@
 #!/usr/bin/env python3
 """
-Backfill Ultrahuman data for a single day or a date range.
-- Loads .env BEFORE importing the app
-- Works with the Partner API mapping you just added
-- Splits long ranges into <=90 day windows
+Standalone sync script that mimics run_data_sync.py but for a specific user.
+This bypasses all Flask dependencies.
 """
 
-from __future__ import annotations
-from datetime import date, datetime, timedelta
-from pathlib import Path
-import os
 import sys
-import time
-import argparse
-from typing import Tuple
-from utils.database import db
+import os
+from datetime import datetime
 
+# Add the project directory to Python path
+project_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, project_dir)
 
-# 1) Load env first so app/services see the keys
+# Load environment variables
 from dotenv import load_dotenv
-PROJECT_ROOT = Path(__file__).resolve().parent
-load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv(os.path.join(project_dir, '.env'))
 
-# Optional sanity prints (comment out if noisy)
-print("BASE:", os.getenv("ULTRAHUMAN_API_BASE"))
-print("KEY present?", bool(os.getenv("ULTRAHUMAN_API_KEY")))
-print("UH_EMAIL:", os.getenv("UH_EMAIL"))
+def standalone_sync(user_id):
+    """Standalone sync for a specific user"""
+    try:
+        # Import after setting up path
+        from app import create_app
+        from app.models import User
+        from tasks.data_ingestion import sync_ultrahuman_data
+        from utils.database import db
 
-# 2) Now import app + task
-from app import create_app
-from app.models import User
-from tasks.data_ingestion import backfill_user_data
+        # Create app context
+        app = create_app()
 
-MAX_WINDOW_DAYS = 90
+        with app.app_context():
+            print(f"Starting standalone sync at {datetime.utcnow()}")
+            print(f"Target user: {user_id}")
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        description="Backfill Ultrahuman metrics."
-    )
-    p.add_argument("--user-id", default="sample_user",
-                   help="User.id in your DB (default: sample_user)")
-    group = p.add_mutually_exclusive_group(required=False)
-    group.add_argument("--day", help="YYYY-MM-DD (single day)")
-    group.add_argument("--start", help="YYYY-MM-DD (inclusive start)")
-    p.add_argument("--end", help="YYYY-MM-DD (exclusive end). Required if --start is used.")
-    p.add_argument("--sleep", type=float, default=2.0,
-                   help="Seconds to sleep between windows (default: 2.0)")
-    return p.parse_args()
+            # Get user
+            user = User.query.filter_by(id=user_id).first()
+            if not user:
+                print(f"❌ User '{user_id}' not found in database")
+                return False
 
-def to_date(s: str) -> date:
-    return datetime.strptime(s, "%Y-%m-%d").date()
+            print(f"✅ Found user: {user.id}")
+            print(f"   Ultrahuman ID: {user.ultrahuman_user_id}")
+            print(f"   Phone: {user.phone_number}")
+            print(f"   Active: {user.is_active}")
+            print()
 
-def windows(start_d: date, end_d: date) -> Tuple[date, date]:
-    """Yield [win_start, win_end) windows up to MAX_WINDOW_DAYS."""
-    cur = start_d
-    while cur < end_d:
-        nxt = min(cur + timedelta(days=MAX_WINDOW_DAYS), end_d)
-        yield cur, nxt
-        cur = nxt
+            # Use only 2 days back
+            days_back = 30
+
+            print(f"Using days back: {days_back} days")
+
+            # Run sync
+            print(f"Calling sync_ultrahuman_data for user: {user_id}")
+            result = sync_ultrahuman_data(user_id, days_back=days_back)
+
+            print(f"Sync result: {result}")
+
+            if result.get('success'):
+                metrics_count = result.get('metrics_inserted', 0)
+                print(f"✅ Successfully synced {metrics_count} metrics for user {user_id}")
+                return True
+            else:
+                error_msg = result.get('error', 'Unknown error')
+                print(f"❌ Sync failed: {error_msg}")
+                return False
+
+    except Exception as e:
+        print(f"❌ CRITICAL ERROR in standalone sync: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return False
 
 def main():
-    args = parse_args()
+    user_id = "sample_user"
 
-    # Resolve date range
-    if args.day:
-        start_d = to_date(args.day)
-        end_d = start_d + timedelta(days=1)  # exclusive
-    elif args.start and args.end:
-        start_d = to_date(args.start)
-        end_d = to_date(args.end)
+    print("=" * 60)
+    print("STANDALONE ULTRAHUMAN SYNC")
+    print("=" * 60)
+    print(f"User ID: {user_id}")
+    print("=" * 60)
+
+    # Run the standalone sync
+    success = standalone_sync(user_id)
+
+    if success:
+        print("\n✅ Standalone sync completed successfully!")
+        print("\nNext steps:")
+        print("1. Check your data: python simple_data_check.py")
+        print("2. Test correlation analysis with your real data")
     else:
-        # default: yesterday
-        end_d = date.today()
-        start_d = end_d - timedelta(days=1)
-
-    if start_d >= end_d:
-        print({"error": "Invalid date range: start must be before end",
-               "start": start_d.isoformat(), "end": end_d.isoformat()})
-        sys.exit(2)
-
-    app = create_app()
-
-    total_metrics = 0
-    total_chunks = 0
-    all_errors = []
-
-    with app.app_context():
-        # Sanity: user exists & active?
-        u = db.session.get(User, args.user_id)
-        if not u:
-            print({"error": f"User {args.user_id} not found."})
-            sys.exit(1)
-        if hasattr(u, "is_active") and not u.is_active:
-            print({"error": f"User {args.user_id} is inactive."})
-            sys.exit(1)
-
-        print(f"Backfill: user={args.user_id}  {start_d.isoformat()} → {end_d.isoformat()}")
-
-        # Break the whole range into <=90d windows; each window is internally chunked to 7d by backfill_user_data
-        for win_start, win_end in windows(start_d, end_d):
-            res = backfill_user_data(
-                args.user_id,
-                win_start.isoformat(),
-                win_end.isoformat()
-            )
-            # Print each window’s outcome
-            print({"window": [win_start.isoformat(), win_end.isoformat()], **res})
-
-            if res.get("success"):
-                total_metrics += int(res.get("total_metrics_processed", 0))
-                total_chunks  += int(res.get("chunks_processed", 0))
-                if res.get("errors"):
-                    all_errors.extend(res["errors"])
-            else:
-                all_errors.append({"date_range": f"{win_start}..{win_end}", "error": res.get("error", "unknown")})
-
-            # Respect rate limits between windows
-            time.sleep(max(0.0, float(args.sleep)))
-
-    # Final summary
-    summary = {
-        "success": True,
-        "user_id": args.user_id,
-        "date_range": {"start": start_d.isoformat(), "end": end_d.isoformat()},
-        "total_metrics_processed": total_metrics,
-        "windows_processed": len(list(windows(start_d, end_d))),
-        "chunks_processed": total_chunks,
-        "errors": all_errors,
-        "completed_at": datetime.utcnow().isoformat()
-    }
-    print(summary)
+        print("\n❌ Standalone sync failed. Check the errors above.")
 
 if __name__ == "__main__":
     main()

@@ -22,6 +22,7 @@ class User(db.Model):
     interventions = db.relationship('Intervention', backref='user', lazy='dynamic', cascade='all, delete-orphan')
     alerts = db.relationship('Alert', backref='user', lazy='dynamic', cascade='all, delete-orphan')
     reports = db.relationship('DailyReport', backref='user', lazy='dynamic', cascade='all, delete-orphan')
+    conversations = db.relationship('Conversation', backref='user', lazy='dynamic', cascade='all, delete-orphan')
 
     def __repr__(self):
         return f'<User {self.id}>'
@@ -281,6 +282,44 @@ class MLModel(db.Model):
     # Model storage (for lightweight models, use model_data; for larger ones, store externally)
     model_data = db.Column(db.LargeBinary)  # Pickled model for small models
     model_path = db.Column(db.String(200))  # External storage path for large models
+
+class Conversation(db.Model):
+    __tablename__ = 'conversations'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.String(50), db.ForeignKey('users.id'), nullable=False)
+    session_id = db.Column(db.String(100), nullable=False)  # Groups related messages
+
+    # Message content
+    query = db.Column(db.Text, nullable=False)
+    response = db.Column(db.Text, nullable=False)
+    query_type = db.Column(db.String(50))  # correlation, trend, health_advice, etc.
+
+    # Analysis context - stores the actual analysis results for follow-ups
+    analysis_data = db.Column(JSON)  # Store analysis results, metrics involved, etc.
+    metrics_involved = db.Column(JSON)  # List of metrics discussed
+
+    # Conversation metadata
+    is_follow_up = db.Column(db.Boolean, default=False)
+    parent_conversation_id = db.Column(db.Integer, db.ForeignKey('conversations.id'))
+
+    # Timestamps
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    # Session management
+    session_expires_at = db.Column(db.DateTime)  # Auto-expire sessions
+
+    # Self-referential relationship for follow-ups
+    follow_ups = db.relationship('Conversation', backref=db.backref('parent', remote_side=[id]), lazy='dynamic')
+
+    __table_args__ = (
+        db.Index('idx_user_session', 'user_id', 'session_id'),
+        db.Index('idx_user_created', 'user_id', 'created_at'),
+        db.Index('idx_session_created', 'session_id', 'created_at'),
+    )
+
+    def __repr__(self):
+        return f'<Conversation {self.id}: {self.query[:50]}...>'
 
 class SystemLog(db.Model):
     __tablename__ = 'system_logs'

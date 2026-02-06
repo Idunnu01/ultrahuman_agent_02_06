@@ -2,6 +2,7 @@
 Flask API Routes for Ultrahuman Lifestyle Agent
 """
 
+import os
 from flask import Blueprint, request, jsonify, current_app
 from datetime import datetime, timedelta
 from app.models import User, Metric, Alert, DailyReport, Intervention
@@ -10,6 +11,9 @@ from services.alert_service import AlertService
 from services.learning_service import LearningService
 from services.statistical_analyzer import StatisticalAnalyzer
 from services.intervention_tracker import InterventionTracker
+from services.sms_health_analyzer import SMSHealthAnalyzer
+from services.llm_chat_analyzer_pa import LLMChatAnalyzer
+from services.sms_service import SMSService
 from tasks.data_ingestion import sync_ultrahuman_data
 from tasks.daily_report import generate_daily_report
 from utils.database import db
@@ -476,6 +480,45 @@ def get_system_stats():
         logger.error(f"Error getting system stats: {str(e)}")
         return {'error': 'Failed to get system stats'}, 500
 
+@main_bp.route('/test/llm', methods=['GET'])
+def test_llm_service():
+    """Test LLM service configuration"""
+    try:
+        from services.minimal_llm_service import MinimalLLMService
+
+        llm = MinimalLLMService()
+
+        # Test with sample correlation data
+        insight = llm.generate_health_insight(
+            correlation_coef=-0.023,
+            p_value=0.000,
+            sample_size=174914,
+            metric1="heart_rate",
+            metric2="temperature"
+        )
+
+        return {
+            "llm_working": True,
+            "working_providers": llm.working_providers,
+            "insight": insight,
+            "environment_vars": {
+                "openai_key_present": bool(os.getenv('OPENAI_API_KEY')),
+                "anthropic_key_present": bool(os.getenv('ANTHROPIC_API_KEY')),
+                "together_key_present": bool(os.getenv('TOGETHER_API_KEY'))
+            }
+        }
+
+    except Exception as e:
+        return {
+            "llm_working": False,
+            "error": str(e),
+            "environment_vars": {
+                "openai_key_present": bool(os.getenv('OPENAI_API_KEY')),
+                "anthropic_key_present": bool(os.getenv('ANTHROPIC_API_KEY')),
+                "together_key_present": bool(os.getenv('TOGETHER_API_KEY'))
+            }
+        }, 500
+
 @main_bp.route('/webhook/ultrahuman', methods=['POST'])
 def ultrahuman_webhook():
     """Webhook endpoint for real-time Ultrahuman data"""
@@ -504,3 +547,135 @@ def ultrahuman_webhook():
     except Exception as e:
         logger.error(f"Error processing Ultrahuman webhook: {str(e)}")
         return {'error': 'Webhook processing failed'}, 500
+
+@main_bp.route('/webhook/sms', methods=['POST'])
+def sms_webhook():
+    """SMS webhook with MMS image support - OPENAI ONLY, NO FALLBACKS"""
+    try:
+        # Get SMS data from Twilio
+        body = request.values.get('Body', '').strip()
+        from_number = request.values.get('From', '')
+
+        # NEW: Check for attached images (MMS)
+        num_media = int(request.values.get('NumMedia', 0))
+        media_urls = []
+
+        if num_media > 0:
+            logger.info(f"Received MMS with {num_media} media attachment(s) from {from_number}")
+            # Twilio sends MediaUrl0, MediaUrl1, etc.
+            for i in range(num_media):
+                media_url = request.values.get(f'MediaUrl{i}')
+                media_content_type = request.values.get(f'MediaContentType{i}', '')
+
+                # Only process images
+                if media_url and media_content_type.startswith('image/'):
+                    media_urls.append(media_url)
+                    logger.info(f"Image {i}: {media_content_type} - {media_url[:50]}...")
+
+        # Get user by phone number
+        user = User.query.filter_by(phone_number=from_number).first()
+        if not user:
+            sms_service = SMSService()
+            sms_service.send_sms(user_id="unknown", phone_number=from_number,
+                               message="❌ User not found. Please register first.",
+                               message_type='response')
+            return "User not found", 400
+
+        # NEW: Handle image messages (meal photos)
+        if media_urls:
+            logger.info(f"Processing {len(media_urls)} meal photo(s) from user {user.id}")
+
+            try:
+                # Import vision analyzer
+                from services.meal_vision_analyzer import MealVisionAnalyzer
+
+                vision_analyzer = MealVisionAnalyzer()
+
+                # Analyze meal photo(s)
+                if len(media_urls) == 1:
+                    response = vision_analyzer.analyze_meal_photo(
+                        user_id=user.id,
+                        image_url=media_urls[0],
+                        user_message=body  # Optional text caption
+                    )
+                else:
+                    # Multiple photos - analyze together
+                    response = vision_analyzer.analyze_multiple_photos(
+                        user_id=user.id,
+                        image_urls=media_urls,
+                        user_message=body
+                    )
+
+                # Send meal analysis response
+                sms_service = SMSService()
+                sms_service.send_immediate_response(user.id, from_number, response)
+
+                logger.info(f"Meal photo analysis sent to user {user.id}: {len(response)} chars")
+                return "Meal photo analyzed", 200
+
+            except Exception as vision_error:
+                logger.error(f"Vision analysis failed for user {user.id}: {str(vision_error)}")
+
+                error_response = f"""🤖 Had trouble analyzing your meal photo.
+
+Error: {str(vision_error)[:100]}
+
+Please try sending a clearer photo or text your question instead."""
+
+                sms_service = SMSService()
+                sms_service.send_immediate_response(user.id, from_number, error_response)
+
+                return f"Vision error reported to user", 500
+
+        # Text-only message processing (existing code)
+        if not body:
+            return "Empty message", 400
+
+        logger.info(f"Received text SMS from {from_number}: {body[:50]}...")
+
+        # OPENAI-ONLY Processing
+        logger.info(f"Processing OpenAI ChatGPT message from user {user.id}: {body[:50]}...")
+
+        try:
+            # Initialize OpenAI LLM Analyzer
+            llm_analyzer = LLMChatAnalyzer()
+
+            # Get ChatGPT response
+            response = llm_analyzer.analyze_message(body, user.id)
+
+            if not response:
+                response = "🤖 I'm having trouble processing your request. Please try rephrasing your question."
+
+            # Handle SMS character limits
+            if len(response) > 1600:
+                lines = response.split('\n')
+                summary_lines = lines[:15]
+                if len(lines) > 15:
+                    summary_lines.append("📱 Response truncated for SMS")
+                response = '\n'.join(summary_lines)
+
+            # Send OpenAI ChatGPT response
+            sms_service = SMSService()
+            sms_service.send_immediate_response(user.id, from_number, response)
+
+            logger.info(f"OpenAI ChatGPT response sent to user {user.id}: {len(response)} chars")
+            return "OpenAI ChatGPT response sent", 200
+
+        except Exception as llm_error:
+            # OpenAI failed - send error message (NO FALLBACK)
+            logger.error(f"OpenAI ChatGPT failed for user {user.id}: {str(llm_error)}")
+
+            error_response = f"""🤖 ChatGPT is temporarily unavailable.
+
+Error: {str(llm_error)[:100]}
+
+Please try again in a moment. Your request: "{body[:50]}..." """
+
+            sms_service = SMSService()
+            sms_service.send_immediate_response(user.id, from_number, error_response)
+
+            return f"OpenAI error reported to user", 500
+
+    except Exception as e:
+        logger.error(f"SMS webhook critical error: {str(e)}")
+        return "Critical SMS error", 500

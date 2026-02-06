@@ -1,0 +1,21 @@
+# Railway Environment Variables Template
+# Copy these to Railway dashboard → Variables
+
+# OpenAI Configuration
+OPENAI_API_KEY=your_openai_api_key_here
+
+# Twilio Configuration
+TWILIO_ACCOUNT_SID=your_twilio_account_sid
+TWILIO_AUTH_TOKEN=your_twilio_auth_token
+TWILIO_PHONE_NUMBER=your_twilio_phone_number
+
+# Database Configuration (Railway PostgreSQL)
+DATABASE_URL=postgresql://username:password@hostname:port/database
+
+# Redis Configuration (Railway Redis)
+REDIS_URL=redis://username:password@hostname:port
+
+# Environment
+ENVIRONMENT=production
+FLASK_ENV=production
+PORT=8000

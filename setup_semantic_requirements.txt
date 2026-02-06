@@ -1,0 +1,12 @@
+# Additional requirements for semantic health analysis
+# Add these to your existing requirements.txt
+
+# PostgreSQL and pgvector support
+psycopg2-binary==2.9.7
+pgvector==0.2.4
+
+# OpenAI for Azure embeddings (if not already included)
+openai>=1.12.0
+
+# Optional: For better JSON parsing
+jsonschema==4.19.2

@@ -108,11 +108,20 @@ def sync_ultrahuman_data(user_id: str, days_back: int = 7) -> Dict:
 
         return {'error': str(e), 'user_id': user_id}
 
-def sync_all_users_data(days_back: int = 1) -> Dict:
-    """Sync Ultrahuman data for all active users (hourly task)"""
+def sync_all_users_data(days_back: int = None, hours_back: int = None) -> Dict:
+    """Sync Ultrahuman data for all active users (configurable timeframe)"""
 
     try:
-        logger.info("Starting bulk data sync for all users")
+        # Default to hours_back=1 for real-time sync, or days_back=1 for legacy calls
+        if hours_back is None and days_back is None:
+            hours_back = 1
+        elif hours_back is not None:
+            timeframe_str = f"last {hours_back} hours"
+        else:
+            timeframe_str = f"last {days_back} days"
+            hours_back = days_back * 24
+
+        logger.info(f"Starting bulk data sync for all users ({timeframe_str})")
 
         # Get all active users
         active_users = User.query.filter_by(is_active=True).all()
@@ -127,16 +136,17 @@ def sync_all_users_data(days_back: int = 1) -> Dict:
             'successful': 0,
             'failed': 0,
             'total_metrics_processed': 0,
-            'errors': []
+            'errors': [],
+            'timeframe': timeframe_str
         }
 
         for user in active_users:
             try:
-                # Sync data for each user asynchronously
-                task_result = sync_ultrahuman_data.delay(user.id, days_back)
+                # Convert hours to fractional days for existing function
+                days_equivalent = max(0.1, hours_back / 24.0)  # At least 0.1 days
 
-                # Wait for completion with timeout
-                result = task_result.get(timeout=180)  # 3 minute timeout per user
+                # Sync data for each user - call directly for real-time
+                result = sync_ultrahuman_data(user.id, days_equivalent)
 
                 if result.get('success'):
                     results['successful'] += 1

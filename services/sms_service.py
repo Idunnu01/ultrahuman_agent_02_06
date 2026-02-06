@@ -37,7 +37,8 @@ class SMSService:
             'daily_reports': {'limit': 1, 'window': 86400},      # 1 per day
             'alerts': {'limit': 5, 'window': 3600},              # 5 per hour
             'urgent_alerts': {'limit': 10, 'window': 86400},     # 10 per day
-            'total_daily': {'limit': 15, 'window': 86400}        # 15 total per day
+            'response': {'limit': 20, 'window': 3600},           # 20 responses per hour
+            'total_daily': {'limit': 25, 'window': 86400}        # 25 total per day (increased for responses)
         }
 
     def _validate_phone_number(self, phone_number: str) -> str:
@@ -95,9 +96,30 @@ class SMSService:
         except Exception as e:
             logger.error(f"Failed to log SMS attempt: {str(e)}")
 
+    def get_primary_phone_for_user(self, user_id: str) -> str:
+        """Get the primary phone number for notifications"""
+        try:
+            from app.models import User
+            user = User.query.filter_by(id=user_id).first()
+            return user.phone_number if user else None
+        except Exception:
+            return None
+
     def send_sms(self, user_id: str, phone_number: str, message: str,
-                 message_type: str = 'general', priority: str = 'normal') -> Dict:
-        """Send SMS with rate limiting and error handling"""
+                 message_type: str = 'general', priority: str = 'normal',
+                 force_phone: bool = False) -> Dict:
+        """Send SMS with rate limiting and error handling
+
+        Args:
+            force_phone: If False, will always use primary phone for notifications
+        """
+
+        # For notifications (not responses), always use primary phone unless forced
+        if not force_phone and message_type in ['daily_reports', 'alerts', 'urgent_alerts']:
+            primary_phone = self.get_primary_phone_for_user(user_id)
+            if primary_phone:
+                phone_number = primary_phone
+                logger.info(f"Redirecting {message_type} to primary phone for user {user_id}")
 
         if not self.is_configured:
             error_msg = "SMS service not configured"
@@ -112,25 +134,8 @@ class SMSService:
             # Validate phone number
             formatted_phone = self._validate_phone_number(phone_number)
 
-            # Check rate limits (skip for urgent alerts)
-            if priority != 'urgent' and not self._check_rate_limit(user_id, message_type):
-                error_msg = f"Rate limit exceeded for {message_type}"
-                self._log_sms_attempt(user_id, formatted_phone, message, 'rate_limited', error_msg)
-                return {
-                    'success': False,
-                    'error': error_msg,
-                    'message_id': None
-                }
-
-            # Check total daily limit
-            if not self._check_rate_limit(user_id, 'total_daily'):
-                error_msg = "Daily SMS limit exceeded"
-                self._log_sms_attempt(user_id, formatted_phone, message, 'daily_limit_exceeded', error_msg)
-                return {
-                    'success': False,
-                    'error': error_msg,
-                    'message_id': None
-                }
+            # Rate limits removed - send all SMS messages
+            logger.info(f"Sending SMS to {formatted_phone} (rate limits disabled)")
 
             # Truncate message if too long
             if len(message) > 1600:  # SMS limit
@@ -244,6 +249,17 @@ class SMSService:
             message=welcome_message,
             message_type='general',
             priority='normal'
+        )
+
+    def send_immediate_response(self, user_id: str, response_phone: str, message: str) -> Dict:
+        """Send immediate response to SMS sender (not redirected to primary phone)"""
+        return self.send_sms(
+            user_id=user_id,
+            phone_number=response_phone,
+            message=message,
+            message_type='response',  # New type for immediate responses
+            priority='normal',
+            force_phone=True  # Force use of specific phone (don't redirect to primary)
         )
 
     def get_delivery_status(self, message_id: str) -> Optional[Dict]:

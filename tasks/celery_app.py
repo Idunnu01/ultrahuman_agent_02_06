@@ -84,17 +84,26 @@ def make_celery(app=None):
                 'options': {'queue': 'reports'}
             },
 
-            # Hourly data sync
-            'sync-ultrahuman-data': {
+            # Real-time data sync (every 15 minutes)
+            'sync-ultrahuman-data-realtime': {
                 'task': 'tasks.data_ingestion.sync_all_users_data',
-                'schedule': crontab(minute=0),
-                'options': {'queue': 'data_sync'}
+                'schedule': crontab(minute='*/15'),
+                'options': {'queue': 'data_sync'},
+                'kwargs': {'hours_back': 1}  # Only sync last hour
             },
 
-            # Real-time data processing (every 15 minutes)
+            # Hourly comprehensive sync (backup)
+            'sync-ultrahuman-data-hourly': {
+                'task': 'tasks.data_ingestion.sync_all_users_data',
+                'schedule': crontab(minute=5),
+                'options': {'queue': 'data_sync'},
+                'kwargs': {'hours_back': 6}  # Catch any missed data
+            },
+
+            # Real-time data processing (every 5 minutes)
             'process-recent-data': {
                 'task': 'tasks.data_ingestion.process_recent_data',
-                'schedule': crontab(minute='*/15'),
+                'schedule': crontab(minute='*/5'),
                 'options': {'queue': 'data_sync'}
             },
 
